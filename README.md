@@ -27,7 +27,8 @@ from vehicles_dev import Vehicles
 
 with Vehicles(os.environ["VEHICLES_API_KEY"]) as vehicles:
     decoded = vehicles.decode_vin("1HGCM82633A004352")
-    print(decoded["vehicle"])
+    vehicle = decoded["vehicle"]
+    print({field: vehicle.get(field) for field in ("make", "model", "modelYear")})
 
     value = vehicles.get_market_value(
         year=2003,
@@ -63,6 +64,9 @@ vehicles = Vehicles(
 )
 ```
 
+Custom remote base URLs must use HTTPS. Plain HTTP is accepted only for explicit local development
+on `localhost`, IPv4 loopback (`127.0.0.0/8`), or IPv6 loopback (`::1`).
+
 The SDK owns the injected transport's lifecycle. Close the client, or use its context manager. The
 client sends `Authorization`, `Accept`, and `User-Agent`; it sends `Content-Type` only with a JSON
 POST body. It never adds `Origin` or `Cookie`, never follows redirects, and never automatically
@@ -80,11 +84,9 @@ Arguments and options use idiomatic `snake_case` and map to the API wire names.
 | `get_recalls(vin)` | `GET /v1/vehicles/recalls/{vin}` |
 | `get_photos(vin)` | `GET /v1/vehicles/photos/{vin}` |
 | `search_listings(...)` | `GET /v1/vehicles/listings` |
-| `get_listing_history(vin)` | `GET /v1/vehicles/history/{vin}` |
 | `get_market_value(...)` | `GET /v1/vehicles/market-value` |
 | `get_depreciation(...)` | `GET /v1/vehicles/depreciation` |
 | `get_ownership_costs(...)` | `GET /v1/vehicles/ownership-costs` |
-| `get_composite_report(vin, ...)` | `GET /v1/vehicles/report/{vin}` |
 | `history_reports.create(vin, ...)` | `POST /v1/vehicles/history-reports` |
 | `history_reports.retry_submission(id)` | `POST /v1/vehicles/history-reports/{id}/retry` |
 | `history_reports.get_status(id)` | `GET /v1/vehicles/history-reports/{id}` |
@@ -108,16 +110,11 @@ listings = vehicles.search_listings(
 )
 ```
 
-### Depreciation, ownership costs, and composite reports
+### Depreciation and ownership costs
 
 ```python
 depreciation = vehicles.get_depreciation(make="Toyota", model="Camry")
 ownership = vehicles.get_ownership_costs(year=2024, make="Toyota", model="Camry")
-report = vehicles.get_composite_report(
-    "4T1G11AK5RU123456",
-    miles=18_000,
-    state="CA",
-)
 ```
 
 ## Durable history reports
@@ -135,14 +132,15 @@ created = vehicles.history_reports.create(
     idempotency_key=idempotency_key,
 )
 result = vehicles.history_reports.wait_for_result(created["id"], max_wait=300)
-print(result["report"])
+print(sorted(result["report"]))  # Section names only; do not log the full report.
 ```
 
 `wait_for_result` polls read-only status at each response's `retryAfterSeconds` cadence and fetches
 the result only after `completed` plus `hasResult: true`. A positive `poll_interval` override is
 available for deterministic tests. The waiter stops with `VehiclesError` on `action_required`, an
 invalid state, timeout, or an `abort_event`. Async task cancellation remains normal
-`asyncio.CancelledError` cancellation and its sleeps never block the event loop.
+`asyncio.CancelledError` cancellation and its sleeps never block the event loop. The original
+`max_wait` deadline also caps each in-flight status and result request.
 
 The waiter never calls `retry_submission`, because resubmission is explicit and can have billing
 consequences. If result retrieval returns `409 report_not_ready`, it honors `Retry-After` and resumes
@@ -160,11 +158,21 @@ API, response, transport, and waiter failures raise `VehiclesError`:
 from vehicles_dev import VehiclesError
 
 try:
-    vehicles.get_listing_history("1HGCM82633A004352")
+    vehicles.get_photos("1HGCM82633A004352")
 except VehiclesError as error:
-    print(error.status, error.code, error.detail, error.request_id)
-    print(error.retryable, error.retry_after_seconds, error.invalid_params)
+    print(
+        {
+            "status": error.status,
+            "code": error.code,
+            "request_id": error.request_id,
+            "retryable": error.retryable,
+        }
+    )
 ```
+
+Vehicle history reports and decoded payloads can contain sensitive vehicle or owner-adjacent data.
+Do not raw-log report payloads, decoded records, `VehiclesError` objects, or their tracebacks. Log
+only explicitly allowlisted operational fields such as `status`, `code`, and `request_id`.
 
 Errors expose `status`, `code`, `detail`, `type`, `request_id`, `retryable`, `invalid_params`, and
 `retry_after_seconds`. HTTP failures parse RFC 9457 problem documents. Timeouts, network failures,

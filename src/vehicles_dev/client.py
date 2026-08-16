@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import math
 import re
@@ -23,11 +24,9 @@ from .types import (
     InvalidParam,
     ListingOrder,
     ListingSort,
-    VehicleCompositeReport,
     VehicleDepreciation,
     VehicleHistoryReport,
     VehicleHistoryReportResult,
-    VehicleListingHistory,
     VehicleListings,
     VehicleMarketValue,
     VehicleOwnershipCosts,
@@ -87,6 +86,13 @@ def _normalize_base_url(value: object) -> str:
         or parsed.password is not None
     ):
         raise ValueError("base_url must be an absolute HTTP(S) URL")
+    if parsed.scheme == "http":
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = parsed.hostname.casefold() == "localhost"
+        if not loopback:
+            raise ValueError("base_url must use HTTPS or HTTP loopback")
     return value.rstrip("/")
 
 
@@ -284,6 +290,14 @@ def _local_error(code: str, detail: str, *, retryable: bool = False) -> Vehicles
     return VehiclesError(code=code, detail=detail, retryable=retryable)
 
 
+def _report_wait_timeout(max_wait: float) -> VehiclesError:
+    return _local_error(
+        "report_wait_timeout",
+        f"The vehicle history report did not complete within {max_wait:g} seconds.",
+        retryable=True,
+    )
+
+
 def _report_delay(report: Mapping[str, object]) -> float:
     value = report.get("retryAfterSeconds")
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
@@ -327,6 +341,10 @@ class _SyncTransport:
     def close(self) -> None:
         self._client.close()
 
+    @property
+    def timeout(self) -> float:
+        return self._timeout
+
     def request(
         self,
         method: Literal["GET", "POST"],
@@ -335,13 +353,18 @@ class _SyncTransport:
         query: Mapping[str, _QueryValue] | None = None,
         body: object = _NO_BODY,
         headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> _TransportResponse:
+        request_timeout = (
+            self._timeout if timeout is None else _positive_seconds(timeout, "timeout")
+        )
         if body is _NO_BODY:
             request = self._client.build_request(
                 method,
                 self._base_url + path,
                 params=_query_params(query),
                 headers=headers,
+                timeout=request_timeout,
             )
         else:
             request = self._client.build_request(
@@ -350,6 +373,7 @@ class _SyncTransport:
                 params=_query_params(query),
                 headers=headers,
                 json=body,
+                timeout=request_timeout,
             )
         try:
             response = self._client.send(request, stream=True)
@@ -358,7 +382,7 @@ class _SyncTransport:
                 code="request_timeout",
                 detail=(
                     f"The request to {self._base_url} did not complete within "
-                    f"{self._timeout:g} seconds."
+                    f"{request_timeout:g} seconds."
                 ),
                 retryable=True,
             ) from None
@@ -376,7 +400,7 @@ class _SyncTransport:
                     code="request_timeout",
                     detail=(
                         f"The request to {self._base_url} did not complete within "
-                        f"{self._timeout:g} seconds."
+                        f"{request_timeout:g} seconds."
                     ),
                     retryable=True,
                 ) from None
@@ -422,14 +446,24 @@ class _SyncHistoryReports:
         )
 
     def get_status(self, report_id: str) -> VehicleHistoryReport:
-        response = self._transport.request("GET", _report_path(report_id))
+        return self._get_status(report_id)
+
+    def _get_status(self, report_id: str, *, timeout: float | None = None) -> VehicleHistoryReport:
+        response = self._transport.request("GET", _report_path(report_id), timeout=timeout)
         return cast(
             VehicleHistoryReport,
             _with_retry_after(response.data, response.retry_after_seconds),
         )
 
     def get_result(self, report_id: str) -> VehicleHistoryReportResult:
-        response = self._transport.request("GET", _report_path(report_id, "/result"))
+        return self._get_result(report_id)
+
+    def _get_result(
+        self, report_id: str, *, timeout: float | None = None
+    ) -> VehicleHistoryReportResult:
+        response = self._transport.request(
+            "GET", _report_path(report_id, "/result"), timeout=timeout
+        )
         return cast(VehicleHistoryReportResult, response.data)
 
     def wait_for_result(
@@ -446,8 +480,19 @@ class _SyncHistoryReports:
         started_at = _monotonic()
         while True:
             self._check_abort(abort_event)
+            remaining = self._remaining(started_at, max_wait)
+            deadline_limited = remaining <= self._transport.timeout
+            try:
+                report = self._get_status(
+                    report_id, timeout=min(self._transport.timeout, remaining)
+                )
+            except VehiclesError as error:
+                self._check_deadline(started_at, max_wait)
+                if error.code == "request_timeout" and deadline_limited:
+                    raise _report_wait_timeout(max_wait) from None
+                raise
+            self._check_abort(abort_event)
             self._check_deadline(started_at, max_wait)
-            report = self.get_status(report_id)
             status = report.get("status")
             if status == "action_required":
                 raise _local_error(
@@ -460,9 +505,16 @@ class _SyncHistoryReports:
                         "invalid_report_state",
                         "The vehicle history report completed without an available result.",
                     )
+                remaining = self._remaining(started_at, max_wait)
+                deadline_limited = remaining <= self._transport.timeout
                 try:
-                    return self.get_result(report_id)
+                    result = self._get_result(
+                        report_id, timeout=min(self._transport.timeout, remaining)
+                    )
                 except VehiclesError as error:
+                    self._check_deadline(started_at, max_wait)
+                    if error.code == "request_timeout" and deadline_limited:
+                        raise _report_wait_timeout(max_wait) from None
                     if error.status != 409 or error.code != "report_not_ready":
                         raise
                     delay = poll_interval or (
@@ -472,6 +524,9 @@ class _SyncHistoryReports:
                     )
                     self._wait(delay, started_at, max_wait, abort_event)
                     continue
+                self._check_abort(abort_event)
+                self._check_deadline(started_at, max_wait)
+                return result
             if status not in {"submitting", "queued", "processing"}:
                 raise _local_error(
                     "invalid_report_state",
@@ -492,11 +547,14 @@ class _SyncHistoryReports:
     @staticmethod
     def _check_deadline(started_at: float, max_wait: float) -> None:
         if _monotonic() - started_at >= max_wait:
-            raise _local_error(
-                "report_wait_timeout",
-                f"The vehicle history report did not complete within {max_wait:g} seconds.",
-                retryable=True,
-            )
+            raise _report_wait_timeout(max_wait)
+
+    @staticmethod
+    def _remaining(started_at: float, max_wait: float) -> float:
+        remaining = max_wait - (_monotonic() - started_at)
+        if remaining <= 0:
+            raise _report_wait_timeout(max_wait)
+        return remaining
 
     def _wait(
         self,
@@ -505,9 +563,7 @@ class _SyncHistoryReports:
         max_wait: float,
         abort_event: threading.Event | None,
     ) -> None:
-        remaining = max_wait - (_monotonic() - started_at)
-        if remaining <= 0:
-            self._check_deadline(started_at, max_wait)
+        remaining = self._remaining(started_at, max_wait)
         delay = min(requested_delay, remaining)
         if abort_event is None:
             _sleep(delay)
@@ -610,9 +666,6 @@ class Vehicles:
             ),
         )
 
-    def get_listing_history(self, vin: str) -> VehicleListingHistory:
-        return cast(VehicleListingHistory, self._get(_vin_path("history", vin)))
-
     def get_market_value(
         self,
         *,
@@ -667,14 +720,6 @@ class Vehicles:
             ),
         )
 
-    def get_composite_report(
-        self, vin: str, *, miles: int | None = None, state: str | None = None
-    ) -> VehicleCompositeReport:
-        return cast(
-            VehicleCompositeReport,
-            self._get(_vin_path("report", vin), {"miles": miles, "state": state}),
-        )
-
 
 class _AsyncTransport:
     def __init__(
@@ -702,6 +747,10 @@ class _AsyncTransport:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    @property
+    def timeout(self) -> float:
+        return self._timeout
+
     async def request(
         self,
         method: Literal["GET", "POST"],
@@ -710,13 +759,18 @@ class _AsyncTransport:
         query: Mapping[str, _QueryValue] | None = None,
         body: object = _NO_BODY,
         headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> _TransportResponse:
+        request_timeout = (
+            self._timeout if timeout is None else _positive_seconds(timeout, "timeout")
+        )
         if body is _NO_BODY:
             request = self._client.build_request(
                 method,
                 self._base_url + path,
                 params=_query_params(query),
                 headers=headers,
+                timeout=request_timeout,
             )
         else:
             request = self._client.build_request(
@@ -725,6 +779,7 @@ class _AsyncTransport:
                 params=_query_params(query),
                 headers=headers,
                 json=body,
+                timeout=request_timeout,
             )
         try:
             response = await self._client.send(request, stream=True)
@@ -733,7 +788,7 @@ class _AsyncTransport:
                 code="request_timeout",
                 detail=(
                     f"The request to {self._base_url} did not complete within "
-                    f"{self._timeout:g} seconds."
+                    f"{request_timeout:g} seconds."
                 ),
                 retryable=True,
             ) from None
@@ -751,7 +806,7 @@ class _AsyncTransport:
                     code="request_timeout",
                     detail=(
                         f"The request to {self._base_url} did not complete within "
-                        f"{self._timeout:g} seconds."
+                        f"{request_timeout:g} seconds."
                     ),
                     retryable=True,
                 ) from None
@@ -797,14 +852,26 @@ class _AsyncHistoryReports:
         )
 
     async def get_status(self, report_id: str) -> VehicleHistoryReport:
-        response = await self._transport.request("GET", _report_path(report_id))
+        return await self._get_status(report_id)
+
+    async def _get_status(
+        self, report_id: str, *, timeout: float | None = None
+    ) -> VehicleHistoryReport:
+        response = await self._transport.request("GET", _report_path(report_id), timeout=timeout)
         return cast(
             VehicleHistoryReport,
             _with_retry_after(response.data, response.retry_after_seconds),
         )
 
     async def get_result(self, report_id: str) -> VehicleHistoryReportResult:
-        response = await self._transport.request("GET", _report_path(report_id, "/result"))
+        return await self._get_result(report_id)
+
+    async def _get_result(
+        self, report_id: str, *, timeout: float | None = None
+    ) -> VehicleHistoryReportResult:
+        response = await self._transport.request(
+            "GET", _report_path(report_id, "/result"), timeout=timeout
+        )
         return cast(VehicleHistoryReportResult, response.data)
 
     async def wait_for_result(
@@ -821,8 +888,22 @@ class _AsyncHistoryReports:
         started_at = _monotonic()
         while True:
             self._check_abort(abort_event)
+            remaining = self._remaining(started_at, max_wait)
+            deadline_limited = remaining <= self._transport.timeout
+            try:
+                async with asyncio.timeout(remaining):
+                    report = await self._get_status(
+                        report_id, timeout=min(self._transport.timeout, remaining)
+                    )
+            except TimeoutError:
+                raise _report_wait_timeout(max_wait) from None
+            except VehiclesError as error:
+                self._check_deadline(started_at, max_wait)
+                if error.code == "request_timeout" and deadline_limited:
+                    raise _report_wait_timeout(max_wait) from None
+                raise
+            self._check_abort(abort_event)
             self._check_deadline(started_at, max_wait)
-            report = await self.get_status(report_id)
             status = report.get("status")
             if status == "action_required":
                 raise _local_error(
@@ -835,9 +916,19 @@ class _AsyncHistoryReports:
                         "invalid_report_state",
                         "The vehicle history report completed without an available result.",
                     )
+                remaining = self._remaining(started_at, max_wait)
+                deadline_limited = remaining <= self._transport.timeout
                 try:
-                    return await self.get_result(report_id)
+                    async with asyncio.timeout(remaining):
+                        result = await self._get_result(
+                            report_id, timeout=min(self._transport.timeout, remaining)
+                        )
+                except TimeoutError:
+                    raise _report_wait_timeout(max_wait) from None
                 except VehiclesError as error:
+                    self._check_deadline(started_at, max_wait)
+                    if error.code == "request_timeout" and deadline_limited:
+                        raise _report_wait_timeout(max_wait) from None
                     if error.status != 409 or error.code != "report_not_ready":
                         raise
                     delay = poll_interval or (
@@ -847,6 +938,9 @@ class _AsyncHistoryReports:
                     )
                     await self._wait(delay, started_at, max_wait, abort_event)
                     continue
+                self._check_abort(abort_event)
+                self._check_deadline(started_at, max_wait)
+                return result
             if status not in {"submitting", "queued", "processing"}:
                 raise _local_error(
                     "invalid_report_state",
@@ -867,11 +961,14 @@ class _AsyncHistoryReports:
     @staticmethod
     def _check_deadline(started_at: float, max_wait: float) -> None:
         if _monotonic() - started_at >= max_wait:
-            raise _local_error(
-                "report_wait_timeout",
-                f"The vehicle history report did not complete within {max_wait:g} seconds.",
-                retryable=True,
-            )
+            raise _report_wait_timeout(max_wait)
+
+    @staticmethod
+    def _remaining(started_at: float, max_wait: float) -> float:
+        remaining = max_wait - (_monotonic() - started_at)
+        if remaining <= 0:
+            raise _report_wait_timeout(max_wait)
+        return remaining
 
     async def _wait(
         self,
@@ -880,9 +977,7 @@ class _AsyncHistoryReports:
         max_wait: float,
         abort_event: asyncio.Event | None,
     ) -> None:
-        remaining = max_wait - (_monotonic() - started_at)
-        if remaining <= 0:
-            self._check_deadline(started_at, max_wait)
+        remaining = self._remaining(started_at, max_wait)
         delay = min(requested_delay, remaining)
         if abort_event is None:
             await _async_sleep(delay)
@@ -989,9 +1084,6 @@ class AsyncVehicles:
             ),
         )
 
-    async def get_listing_history(self, vin: str) -> VehicleListingHistory:
-        return cast(VehicleListingHistory, await self._get(_vin_path("history", vin)))
-
     async def get_market_value(
         self,
         *,
@@ -1046,14 +1138,6 @@ class AsyncVehicles:
                 "/v1/vehicles/ownership-costs",
                 {"make": make, "model": model, "year": year},
             ),
-        )
-
-    async def get_composite_report(
-        self, vin: str, *, miles: int | None = None, state: str | None = None
-    ) -> VehicleCompositeReport:
-        return cast(
-            VehicleCompositeReport,
-            await self._get(_vin_path("report", vin), {"miles": miles, "state": state}),
         )
 
 

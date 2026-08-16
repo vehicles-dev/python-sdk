@@ -56,6 +56,14 @@ def install_async_clock(monkeypatch: pytest.MonkeyPatch) -> tuple[list[float], l
     return now, sleeps
 
 
+def request_timeout(request: httpx.Request) -> float:
+    raw = request.extensions["timeout"]
+    assert isinstance(raw, dict)
+    values = {float(value) for value in raw.values() if value is not None}
+    assert len(values) == 1
+    return values.pop()
+
+
 def test_create_requires_and_preserves_caller_uuid_without_generation() -> None:
     requests: list[httpx.Request] = []
 
@@ -190,6 +198,71 @@ def test_wait_enforces_positive_options_deadline_and_abort(monkeypatch: pytest.M
     assert requests == 2
 
 
+def test_sync_wait_caps_stalled_status_request_to_remaining_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now, _ = install_sync_clock(monkeypatch)
+    observed_timeouts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeout = request_timeout(request)
+        observed_timeouts.append(timeout)
+        now[0] += timeout
+        raise httpx.ReadTimeout("stalled status", request=request)
+
+    with (
+        Vehicles(API_KEY, timeout=30, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(VehiclesError) as raised,
+    ):
+        client.history_reports.wait_for_result(REPORT_ID, max_wait=5)
+
+    assert raised.value.code == "report_wait_timeout"
+    assert raised.value.retryable is True
+    assert observed_timeouts == [5]
+
+
+def test_sync_wait_caps_stalled_result_request_to_remaining_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now, _ = install_sync_clock(monkeypatch)
+    observed_timeouts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeout = request_timeout(request)
+        observed_timeouts.append(timeout)
+        if request.url.path.endswith("/result"):
+            now[0] += timeout
+            raise httpx.ReadTimeout("stalled result", request=request)
+        return json_response(report_view("completed", has_result=True))
+
+    with (
+        Vehicles(API_KEY, timeout=30, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(VehiclesError) as raised,
+    ):
+        client.history_reports.wait_for_result(REPORT_ID, max_wait=4)
+
+    assert raised.value.code == "report_wait_timeout"
+    assert observed_timeouts == [4, 4]
+
+
+def test_sync_wait_translates_late_api_error_to_deadline_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now, _ = install_sync_clock(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        now[0] += request_timeout(request)
+        return json_response({"code": "busy", "detail": "Try later."}, status=503)
+
+    with (
+        Vehicles(API_KEY, timeout=30, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(VehiclesError) as raised,
+    ):
+        client.history_reports.wait_for_result(REPORT_ID, max_wait=3)
+
+    assert raised.value.code == "report_wait_timeout"
+
+
 @pytest.mark.asyncio
 async def test_async_wait_has_equivalent_polling_and_not_ready_recovery(
     monkeypatch: pytest.MonkeyPatch,
@@ -272,3 +345,66 @@ async def test_async_wait_surfaces_action_required_and_deadline(
 
     assert timed_out.value.code == "report_wait_timeout"
     assert sleeps == [2, 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [report_view("completed"), report_view("unknown")])
+async def test_async_wait_surfaces_completed_without_result_and_unknown_states(
+    payload: dict[str, Any],
+) -> None:
+    async with AsyncVehicles(
+        API_KEY, transport=httpx.MockTransport(lambda request: json_response(payload))
+    ) as client:
+        with pytest.raises(VehiclesError) as raised:
+            await client.history_reports.wait_for_result(REPORT_ID)
+
+    assert raised.value.code == "invalid_report_state"
+
+
+class StalledAsyncReportTransport(httpx.AsyncBaseTransport):
+    def __init__(self, *, stall_result: bool) -> None:
+        self.stall_result = stall_result
+        self.observed_timeouts: list[float] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.observed_timeouts.append(request_timeout(request))
+        if not self.stall_result or request.url.path.endswith("/result"):
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+        return json_response(report_view("completed", has_result=True))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stall_result", [False, True])
+async def test_async_wait_enforces_deadline_during_stalled_http_requests(
+    stall_result: bool,
+) -> None:
+    transport = StalledAsyncReportTransport(stall_result=stall_result)
+    async with AsyncVehicles(API_KEY, timeout=30, transport=transport) as client:
+        with pytest.raises(VehiclesError) as raised:
+            await asyncio.wait_for(
+                client.history_reports.wait_for_result(REPORT_ID, max_wait=0.02),
+                timeout=0.5,
+            )
+
+    assert raised.value.code == "report_wait_timeout"
+    assert raised.value.retryable is True
+    assert len(transport.observed_timeouts) == (2 if stall_result else 1)
+    assert all(0 < timeout <= 0.02 for timeout in transport.observed_timeouts)
+
+
+@pytest.mark.asyncio
+async def test_async_wait_translates_late_api_error_to_deadline_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now, _ = install_async_clock(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        now[0] += request_timeout(request)
+        return json_response({"code": "busy", "detail": "Try later."}, status=503)
+
+    async with AsyncVehicles(API_KEY, timeout=30, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(VehiclesError) as raised:
+            await client.history_reports.wait_for_result(REPORT_ID, max_wait=3)
+
+    assert raised.value.code == "report_wait_timeout"

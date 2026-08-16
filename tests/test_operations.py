@@ -17,7 +17,7 @@ def _assert_common_headers(request: httpx.Request) -> None:
     assert "origin" not in request.headers
 
 
-def test_sync_maps_all_fourteen_routes_and_wire_values() -> None:
+def test_sync_maps_all_twelve_published_routes_and_wire_values() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -39,7 +39,6 @@ def test_sync_maps_all_fourteen_routes_and_wire_values() -> None:
             valid_vin=True,
             year_min=None,
         )
-        client.get_listing_history(VIN)
         client.get_market_value(
             year=2022,
             make="Honda",
@@ -51,30 +50,30 @@ def test_sync_maps_all_fourteen_routes_and_wire_values() -> None:
         )
         client.get_depreciation(make="Honda", model="Accord")
         client.get_ownership_costs(year=2022, make="Honda", model="Accord")
-        client.get_composite_report(VIN, miles=12_345, state=None)
         client.history_reports.create(VIN.lower(), idempotency_key=IDEMPOTENCY_KEY)
         client.history_reports.retry_submission("report/with space")
         client.history_reports.get_status(REPORT_ID)
         client.history_reports.get_result(REPORT_ID)
 
-    assert [request.method for request in requests] == ["GET"] * 10 + ["POST", "POST", "GET", "GET"]
+        assert not hasattr(client, "get_listing_history")
+        assert not hasattr(client, "get_composite_report")
+
+    assert [request.method for request in requests] == ["GET"] * 8 + ["POST", "POST", "GET", "GET"]
     assert [request.url.path for request in requests] == [
         f"/gateway/v1/vehicles/vin/{VIN}",
         f"/gateway/v1/vehicles/specifications/{VIN}",
         f"/gateway/v1/vehicles/recalls/{VIN}",
         f"/gateway/v1/vehicles/photos/{VIN}",
         "/gateway/v1/vehicles/listings",
-        f"/gateway/v1/vehicles/history/{VIN}",
         "/gateway/v1/vehicles/market-value",
         "/gateway/v1/vehicles/depreciation",
         "/gateway/v1/vehicles/ownership-costs",
-        f"/gateway/v1/vehicles/report/{VIN}",
         "/gateway/v1/vehicles/history-reports",
         "/gateway/v1/vehicles/history-reports/report/with space/retry",
         f"/gateway/v1/vehicles/history-reports/{REPORT_ID}",
         f"/gateway/v1/vehicles/history-reports/{REPORT_ID}/result",
     ]
-    assert "%2F" in str(requests[11].url) and "%20" in str(requests[11].url)
+    assert "%2F" in str(requests[9].url) and "%20" in str(requests[9].url)
     assert dict(requests[4].url.params) == {
         "active": "false",
         "limit": "25",
@@ -82,7 +81,7 @@ def test_sync_maps_all_fourteen_routes_and_wire_values() -> None:
         "sort": "days_on_market",
         "valid_vin": "true",
     }
-    assert dict(requests[6].url.params) == {
+    assert dict(requests[5].url.params) == {
         "base_msrp": "28000",
         "body_style": "Sedan",
         "make": "Honda",
@@ -91,23 +90,22 @@ def test_sync_maps_all_fourteen_routes_and_wire_values() -> None:
         "state": "CA",
         "year": "2022",
     }
-    assert dict(requests[7].url.params) == {"make": "Honda", "model": "Accord"}
-    assert dict(requests[8].url.params) == {
+    assert dict(requests[6].url.params) == {"make": "Honda", "model": "Accord"}
+    assert dict(requests[7].url.params) == {
         "make": "Honda",
         "model": "Accord",
         "year": "2022",
     }
-    assert dict(requests[9].url.params) == {"miles": "12345"}
-    assert json.loads(requests[10].content) == {"vin": VIN}
-    assert requests[10].headers["idempotency-key"] == IDEMPOTENCY_KEY
-    assert requests[10].headers["content-type"] == "application/json"
-    assert "content-type" not in requests[11].headers
+    assert json.loads(requests[8].content) == {"vin": VIN}
+    assert requests[8].headers["idempotency-key"] == IDEMPOTENCY_KEY
+    assert requests[8].headers["content-type"] == "application/json"
+    assert "content-type" not in requests[9].headers
     for request in requests:
         _assert_common_headers(request)
 
 
 @pytest.mark.asyncio
-async def test_async_maps_all_fourteen_routes_with_sync_parity() -> None:
+async def test_async_maps_all_twelve_published_routes_with_sync_parity() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -124,35 +122,34 @@ async def test_async_maps_all_fourteen_routes_with_sync_parity() -> None:
         await client.get_recalls(VIN)
         await client.get_photos(VIN)
         await client.search_listings(active=True, sold=False)
-        await client.get_listing_history(VIN)
         await client.get_market_value(year=2020, make="Ford", model="F-150")
         await client.get_depreciation(make="Ford", model="F-150")
         await client.get_ownership_costs(year=2020, make="Ford", model="F-150")
-        await client.get_composite_report(VIN)
         await client.history_reports.create(VIN, idempotency_key=IDEMPOTENCY_KEY)
         await client.history_reports.retry_submission(REPORT_ID)
         await client.history_reports.get_status(REPORT_ID)
         await client.history_reports.get_result(REPORT_ID)
 
-    assert [request.method for request in requests] == ["GET"] * 10 + ["POST", "POST", "GET", "GET"]
+        assert not hasattr(client, "get_listing_history")
+        assert not hasattr(client, "get_composite_report")
+
+    assert [request.method for request in requests] == ["GET"] * 8 + ["POST", "POST", "GET", "GET"]
     assert [request.url.path.removeprefix("/proxy") for request in requests] == [
         f"/v1/vehicles/vin/{VIN}",
         f"/v1/vehicles/specifications/{VIN}",
         f"/v1/vehicles/recalls/{VIN}",
         f"/v1/vehicles/photos/{VIN}",
         "/v1/vehicles/listings",
-        f"/v1/vehicles/history/{VIN}",
         "/v1/vehicles/market-value",
         "/v1/vehicles/depreciation",
         "/v1/vehicles/ownership-costs",
-        f"/v1/vehicles/report/{VIN}",
         "/v1/vehicles/history-reports",
         f"/v1/vehicles/history-reports/{REPORT_ID}/retry",
         f"/v1/vehicles/history-reports/{REPORT_ID}",
         f"/v1/vehicles/history-reports/{REPORT_ID}/result",
     ]
     assert dict(requests[4].url.params) == {"active": "true", "sold": "false"}
-    assert dict(requests[6].url.params) == {"make": "Ford", "model": "F-150", "year": "2020"}
+    assert dict(requests[5].url.params) == {"make": "Ford", "model": "F-150", "year": "2020"}
     for request in requests:
         _assert_common_headers(request)
 
@@ -164,6 +161,60 @@ async def test_async_maps_all_fourteen_routes_with_sync_parity() -> None:
 def test_rejects_invalid_base_urls(base_url: str) -> None:
     with pytest.raises(ValueError, match=r"absolute HTTP\(S\)"):
         Vehicles(API_KEY, base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://example.test",
+        "http://192.168.1.10",
+        "http://127.example.test",
+        "http://[::2]",
+        "http://localhost.example.test",
+    ],
+)
+def test_sync_rejects_non_loopback_http_base_urls(base_url: str) -> None:
+    with pytest.raises(ValueError, match="HTTPS or HTTP loopback"):
+        Vehicles(API_KEY, base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://gateway.example.test/prefix",
+        "http://localhost:8080/prefix",
+        "http://127.0.0.1",
+        "http://127.255.255.254:9000",
+        "http://[::1]:8080",
+    ],
+)
+def test_sync_allows_https_and_explicit_loopback_http(base_url: str) -> None:
+    with Vehicles(
+        API_KEY,
+        base_url=base_url,
+        transport=httpx.MockTransport(lambda request: json_response({})),
+    ):
+        pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base_url", ["http://example.test", "http://10.0.0.4", "http://[::2]"])
+async def test_async_rejects_non_loopback_http_base_urls(base_url: str) -> None:
+    with pytest.raises(ValueError, match="HTTPS or HTTP loopback"):
+        AsyncVehicles(API_KEY, base_url=base_url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base_url", ["https://gateway.example.test", "http://localhost", "http://[::1]"]
+)
+async def test_async_allows_https_and_explicit_loopback_http(base_url: str) -> None:
+    async with AsyncVehicles(
+        API_KEY,
+        base_url=base_url,
+        transport=httpx.MockTransport(lambda request: json_response({})),
+    ):
+        pass
 
 
 @pytest.mark.parametrize("api_key", ["", "  ", None])

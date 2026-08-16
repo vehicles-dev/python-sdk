@@ -61,19 +61,6 @@ class VehicleListings(TypedDict):
     total: int
 
 
-class VehicleListingHistory(TypedDict):
-    currentPrice: int | None
-    currentlyActive: bool
-    firstSeen: str
-    lastSeen: str
-    observations: list[JsonObject]
-    priceChanges: int
-    priceMax: int | None
-    priceMin: int | None
-    source: Literal["carscrape"]
-    vin: str
-
-
 class VehicleMarketValue(TypedDict):
     currency: str
     estimateUsd: int
@@ -106,17 +93,6 @@ class VehicleOwnershipCosts(TypedDict):
     year: int
 
 
-class VehicleCompositeReport(TypedDict):
-    coverage: list[str]
-    depreciation: JsonObject | None
-    generatedAt: str
-    identity: JsonObject
-    marketValue: JsonObject | None
-    origin: Literal["store", "vpic"]
-    source: Literal["carscrape"]
-    vin: str
-
-
 class VehicleHistoryReport(TypedDict):
     createdAt: str
     hasResult: bool
@@ -141,12 +117,10 @@ __all__ = [
     "JsonObject",
     "ListingOrder",
     "ListingSort",
-    "VehicleCompositeReport",
     "VehicleDepreciation",
     "VehicleHistoryReport",
     "VehicleHistoryReportResult",
     "VehicleHistoryReportStatus",
-    "VehicleListingHistory",
     "VehicleListings",
     "VehicleMarketValue",
     "VehicleOwnershipCosts",
