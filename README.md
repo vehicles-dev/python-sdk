@@ -10,9 +10,13 @@ Python 3.11 and newer, with synchronous and asynchronous clients powered by `htt
 
 ## Install
 
+The PyPI release is not enabled yet. Install the tagged starter directly from GitHub:
+
 ```sh
-pip install vehicles-dev
+pip install "vehicles-dev @ git+https://github.com/vehicles-dev/python-sdk.git@v0.1.0"
 ```
+
+Once the PyPI package is published, the install command will be `pip install vehicles-dev`.
 
 ## Quick start
 
@@ -188,4 +192,3 @@ Tests use injected transports and never contact production or make billable requ
 
 MIT. API access and returned data remain subject to the
 [Vehicles.dev terms of service](https://vehicles.dev/terms).
-
