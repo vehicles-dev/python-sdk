@@ -12,7 +12,7 @@ from vehicles_dev import AsyncVehicles, Vehicles, VehiclesError
 def _assert_common_headers(request: httpx.Request) -> None:
     assert request.headers["authorization"] == f"Bearer {API_KEY}"
     assert request.headers["accept"] == "application/json"
-    assert request.headers["user-agent"] == "vehicles-dev-python/0.1.0"
+    assert request.headers["user-agent"] == "vehicles-dev-python/0.1.1"
     assert "cookie" not in request.headers
     assert "origin" not in request.headers
 
@@ -223,7 +223,7 @@ def test_requires_a_nonblank_api_key(api_key: str | None) -> None:
         Vehicles(api_key)  # type: ignore[arg-type]
 
 
-def test_validates_immediate_vin_paths_but_defers_history_vin_validation() -> None:
+def test_trims_and_canonicalizes_lowercase_immediate_vin() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -231,10 +231,31 @@ def test_validates_immediate_vin_paths_but_defers_history_vin_validation() -> No
         return json_response({})
 
     with Vehicles(API_KEY, transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(ValueError, match="between 1 and 32"):
-            client.decode_vin("")
-        with pytest.raises(ValueError, match="between 1 and 32"):
-            client.get_photos("x" * 33)
+        client.decode_vin(f" {VIN.lower()} ")
+
+    assert requests[0].url.path == f"/v1/vehicles/vin/{VIN}"
+
+
+@pytest.mark.parametrize(
+    "vin",
+    [
+        "A" * 16,
+        "A" * 18,
+        "1HGCM826I3A004352",
+        "1HGCM826O3A004352",
+        "1HGCM826Q3A004352",
+    ],
+)
+def test_rejects_invalid_immediate_vins_but_defers_history_vin_validation(vin: str) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return json_response({})
+
+    with Vehicles(API_KEY, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="exactly 17 characters"):
+            client.decode_vin(vin)
         client.history_reports.create(" short ", idempotency_key=IDEMPOTENCY_KEY)
 
     assert json.loads(requests[0].content) == {"vin": "SHORT"}

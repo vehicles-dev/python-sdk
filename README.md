@@ -13,7 +13,7 @@ Python 3.11 and newer, with synchronous and asynchronous clients powered by `htt
 The PyPI release is not enabled yet. Install the tagged starter directly from GitHub:
 
 ```sh
-pip install "vehicles-dev @ git+https://github.com/vehicles-dev/python-sdk.git@v0.1.0"
+pip install "vehicles-dev @ git+https://github.com/vehicles-dev/python-sdk.git@v0.1.1"
 ```
 
 Once the PyPI package is published, the install command will be `pip install vehicles-dev`.
@@ -28,7 +28,7 @@ from vehicles_dev import Vehicles
 with Vehicles(os.environ["VEHICLES_API_KEY"]) as vehicles:
     decoded = vehicles.decode_vin("1HGCM82633A004352")
     vehicle = decoded["vehicle"]
-    print({field: vehicle.get(field) for field in ("make", "model", "modelYear")})
+    print({field: vehicle.get(field) for field in ("make", "model", "year")})
 
     value = vehicles.get_market_value(
         year=2003,
@@ -92,9 +92,10 @@ Arguments and options use idiomatic `snake_case` and map to the API wire names.
 | `history_reports.get_status(id)` | `GET /v1/vehicles/history-reports/{id}` |
 | `history_reports.get_result(id)` | `GET /v1/vehicles/history-reports/{id}/result` |
 
-VIN path values are trimmed, uppercased, and percent-encoded. Immediate data endpoints enforce the
-gateway's 1–32 character VIN contract. Durable history-report creation uppercases its body value but
-leaves the route's strict 17-character VIN validation to the server.
+VIN path values are trimmed, uppercased, validated, and percent-encoded. Immediate data endpoints
+require exactly 17 VIN-safe characters matching `[A-HJ-NPR-Za-hj-npr-z0-9]{17}`; the letters I, O,
+and Q are not allowed. Durable history-report creation uppercases its body value but leaves the
+route's strict 17-character VIN validation to the server.
 
 ### Listings
 
