@@ -39,11 +39,12 @@ from .types import (
 DEFAULT_BASE_URL = "https://api.vehicles.dev"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_WAIT = 300.0
-USER_AGENT = "vehicles-dev-python/0.1.0"
+USER_AGENT = "vehicles-dev-python/0.1.1"
 _UUID_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+_VIN_PATTERN = re.compile(r"^[A-HJ-NPR-Za-hj-npr-z0-9]{17}$")
 _NO_BODY = object()
 _QueryValue = bool | float | int | str | None
 
@@ -105,10 +106,13 @@ def _normalize_api_key(value: object) -> str:
 def _normalize_vin(vin: object) -> str:
     if not isinstance(vin, str):
         raise TypeError("VIN must be a string")
-    normalized = vin.strip().upper()
-    if not 1 <= len(normalized) <= 32:
-        raise ValueError("VIN must contain between 1 and 32 characters")
-    return normalized
+    trimmed = vin.strip()
+    if _VIN_PATTERN.fullmatch(trimmed) is None:
+        raise ValueError(
+            "VIN must be exactly 17 characters using A-H, J-N, P, R-Z, and 0-9 "
+            "(I, O, and Q are not allowed)"
+        )
+    return trimmed.upper()
 
 
 def _normalize_history_vin(vin: object) -> str:

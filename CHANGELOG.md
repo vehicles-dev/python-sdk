@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-08-17
+
+### Fixed
+
+- Aligned immediate-response VIN validation with the API's exact 17-character VIN-safe contract,
+  including lowercase canonicalization and rejection of I, O, and Q.
+- Corrected the quickstart decode example to read the wire-format `year` field.
+
 ## [0.1.0] - 2026-08-17
 
 ### Added
